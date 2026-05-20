@@ -17,7 +17,7 @@ v2 변경점:
     {out_dir}/
     ├── intensity/frame_NNNN.png             ← 8-bit mono (RTMDet 입력)
     ├── pointcloud/frame_NNNN.ply            ← Open3D PCD (m 단위, valid만)
-    ├── pointcloud_organized/frame_NNNN.npy  ← (H,W,3) mm 단위, NaN 포함 (Stage 5용)
+    ├── pointcloud_organized/frame_NNNN.npy  ← (H,W,3) mm 단위, NaN 포함
     ├── valid_mask/frame_NNNN.npy            ← (H,W) bool
     ├── metadata/frame_NNNN.json             ← 캡처 정보
     └── config_snapshot.yaml                 ← 카메라 설정 백업
@@ -51,9 +51,10 @@ from src.camera import create_camera  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
+    current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
     p = argparse.ArgumentParser(description="빈 피킹 데이터셋 수집 (organized PCD 포함)")
     p.add_argument("--config", type=Path, default=ROOT / "config" / "config.yaml")
-    p.add_argument("--out", type=Path, default=ROOT / "data" / "dataset" / "brackets_for_train")
+    p.add_argument("--out", type=Path, default=ROOT / "data" / "dataset" / current_time)
     p.add_argument("--num", type=int, default=10, help="캡처할 프레임 수")
     p.add_argument("--warmup", type=int, default=3, help="시작 시 버리는 워밍업 수")
     p.add_argument("--start-index", type=int, default=1, help="시작 프레임 번호")

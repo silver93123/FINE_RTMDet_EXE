@@ -33,8 +33,8 @@ model = dict(
 # -----------------------------------------------------------------------------
 # 2. 데이터셋 설정
 # -----------------------------------------------------------------------------
-# 우리 데이터셋 경로 (절대경로 사용 - mmdet 상속 시 안전)
-data_root = '/home/silver/binpicking_vision/FINE_RTMDet/data/dataset_train/20260515_2221/'
+# 학습용 데이터셋 경로 (절대경로 사용 - mmdet 상속 시 안전)
+data_root = '/home/silver/binpicking_vision/FINE_RTMDet/data/dataset_train/20260520_193909/'
 
 # 클래스 이름과 색상 (시각화용)
 metainfo = dict(
@@ -50,7 +50,7 @@ train_dataloader = dict(
         type='CocoDataset',
         data_root=data_root,
         metainfo=metainfo,
-        ann_file='coco_labels/annotations/instances_Train.json',
+        ann_file='annotations/instances_Train.json',
         data_prefix=dict(img='intensity/'),  # PNG 위치
         filter_cfg=dict(filter_empty_gt=True, min_size=32),
     )
@@ -64,7 +64,7 @@ val_dataloader = dict(
         type='CocoDataset',
         data_root=data_root,
         metainfo=metainfo,
-        ann_file='coco_labels/annotations/instances_Train.json',
+        ann_file='annotations/instances_Train.json',
         data_prefix=dict(img='intensity/'),
         test_mode=True,
     )
@@ -76,7 +76,7 @@ test_dataloader = val_dataloader
 # 평가 메트릭
 val_evaluator = dict(
     type='CocoMetric',
-    ann_file=data_root + 'coco_labels/annotations/instances_Train.json',
+    ann_file=data_root + 'annotations/instances_Train.json',
     metric=['bbox', 'segm'],   # detection + instance segmentation 둘 다
     format_only=False,
 )
