@@ -329,98 +329,112 @@ def draw_picks_on_overlay(image_bgr: np.ndarray, picks_2d: list) -> np.ndarray:
 
 
 # =============================================================================
-# 실시간 시각화 창
+# Real-time visualization window
 # =============================================================================
 
 _WIN = "BinPicking Monitor"
 
-def _put(img, text, x, y, color=(220,220,220), scale=0.48, thickness=1):
+def _put(img, text, x, y, color=(220,220,220), scale=0.46, thickness=1):
     cv2.putText(img, text, (x, y),
                 cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv2.LINE_AA)
 
 def build_info_panel(h: int, w: int, info: dict) -> np.ndarray:
-    """오른쪽 정보 패널 이미지 생성."""
-    panel = np.full((h, w, 3), 30, dtype=np.uint8)
-    x0, lh = 14, 22
+    MIN_PANEL_H = 680
+    ph = max(h, MIN_PANEL_H)
+    panel = np.full((ph, w, 3), 28, dtype=np.uint8)
+    x0, lh = 12, 20
 
-    def sep(y, c=(60,60,60)):
-        cv2.line(panel, (x0, y), (w - x0, y), c, 1)
-    def title(text, y, color=(100,200,255)):
-        _put(panel, text, x0, y, color=color, scale=0.50)
-    def row(text, y, color=(200,200,200)):
-        _put(panel, text, x0+8, y, color=color, scale=0.44)
+    def sep(y, c=(55,55,55)):
+        cv2.line(panel, (x0, y), (w-x0, y), c, 1)
+    def section(text, y, color=(100,200,255)):
+        _put(panel, text, x0, y, color=color, scale=0.47)
+    def row(text, y, color=(190,190,190)):
+        _put(panel, text, x0+6, y, color=color, scale=0.41)
 
-    y = 22
-    _put(panel, "BinPicking Monitor", x0, y, color=(255,200,60), scale=0.58, thickness=1)
-    y += lh + 4; sep(y); y += lh
+    y = 19
+    _put(panel, "BinPicking Monitor", x0, y, color=(255,200,60), scale=0.53, thickness=1)
+    y += lh+2; sep(y); y += lh
 
-    status  = info.get("status", "대기 중")
-    s_color = {"대기 중":(160,160,160),"처리 중":(60,200,255),
-               "완료":(60,220,60),"No detection":(60,140,255),
+    status  = info.get("status", "Waiting")
+    s_color = {"Waiting":(150,150,150),"Processing":(60,200,255),
+               "Done":(60,220,60),"No detection":(60,140,255),
                "Error":(60,60,220)}.get(status, (200,200,200))
-    title("[ 서버 상태 ]", y); y += lh
+    section("[ Server Status ]", y); y += lh
     row(f"Status   : {status}", y, color=s_color); y += lh
     row(f"Frame #  : {info.get('frame_idx', '-')}", y); y += lh
-    row(f"Time     : {info.get('timestamp', '-')}", y); y += lh+4
+    row(f"Time     : {info.get('timestamp', '-')}", y); y += lh+2
     sep(y); y += lh
 
-    title("[ 캡처 정보 ]", y); y += lh
+    section("[ Capture Info ]", y); y += lh
     row(f"Capture  : {info.get('capture_ms', 0):.0f} ms", y); y += lh
     row(f"Valid    : {info.get('valid_ratio', 0):.1f} %", y); y += lh
-    row(f"Z range  : {info.get('z_min', 0):.0f} ~ {info.get('z_max', 0):.0f} mm", y); y += lh+4
+    row(f"Z range  : {info.get('z_min', 0):.0f} ~ {info.get('z_max', 0):.0f} mm", y); y += lh+2
     sep(y); y += lh
 
-    title("[ 처리 시간 ]", y); y += lh
+    section("[ Timing ]", y); y += lh
     row(f"Detection: {info.get('det_ms', 0):.0f} ms", y); y += lh
     row(f"ICP      : {info.get('icp_ms', 0):.0f} ms", y); y += lh
     total = info.get("capture_ms",0)+info.get("det_ms",0)+info.get("icp_ms",0)
-    row(f"Total    : {total:.0f} ms", y, color=(255,200,60)); y += lh+4
+    row(f"Total    : {total:.0f} ms", y, color=(255,200,60)); y += lh+2
     sep(y); y += lh
 
     picks = info.get("picks", [])
-    title(f"[ 검출 결과 : {len(picks)}개 ]", y); y += lh
+    section(f"[ Results : {len(picks)} obj(s) ]", y); y += lh
     if not picks:
-        row("  검출된 객체 없음", y, color=(100,100,255)); y += lh
+        row("  No objects detected", y, color=(100,100,220))
     else:
         for i, pk in enumerate(picks):
-            if y + lh*5 > h - 10:
-                row(f"  ... +{len(picks)-i}개 더", y, color=(140,140,140))
-                break
             pp  = pk["position_mm"]
             deg = pk["approach_deg"]
             fit = pk["icp_fitness"]
             ci  = tuple(int(v) for v in _PALETTE_BGR[i % len(_PALETTE_BGR)])
-            sep(y, c=(50,50,50)); y += lh-6
-            _put(panel, f"  Obj #{i}", x0, y, color=ci, scale=0.46)
+            sep(y, c=(45,45,45)); y += lh-4
+            _put(panel, f"  Obj #{i}", x0, y, color=ci, scale=0.43)
             y += lh-2
-            row(f"  X={pp[0]:+8.2f}  Y={pp[1]:+8.2f}  Z={pp[2]:+8.2f} mm", y); y += lh-2
-            row(f"  R={deg['roll_deg']:+7.2f} P={deg['pitch_deg']:+7.2f}"
-                f" Yaw={deg['yaw_deg']:+7.2f} deg", y); y += lh-2
+            row(f"  X= {pp[0]:+8.2f}  Y= {pp[1]:+8.2f}", y); y += lh-3
+            row(f"  Z= {pp[2]:+8.2f} mm", y); y += lh-3
+            row(f"  R= {deg['roll_deg']:+7.2f}  P= {deg['pitch_deg']:+7.2f}", y); y += lh-3
+            row(f"  Yaw= {deg['yaw_deg']:+7.2f} deg", y); y += lh-3
             fc = (60,220,60) if fit>=0.7 else (60,140,255) if fit>=0.5 else (60,60,220)
             row(f"  ICP fit : {fit:.3f}", y, color=fc); y += lh
 
-    sep(y); y += lh
-    row("QUIT=종료  /  ESC=창 닫기", y, color=(90,90,90))
+    sep(ph-22)
+    _put(panel, "QUIT=exit  ESC=close window",
+         x0, ph-8, color=(80,80,80), scale=0.37)
     return panel
 
 
 def show_monitor(overlay_bgr: np.ndarray, info: dict):
-    """overlay(왼쪽) + 정보 패널(오른쪽) 합쳐서 imshow. 새 프레임마다 호출."""
-    PANEL_W = 320
-    h = overlay_bgr.shape[0]
-    panel   = build_info_panel(h, PANEL_W, info)
-    divider = np.full((h, 2, 3), 80, dtype=np.uint8)
+    """overlay 1.5x 확대 후 info panel 과 나란히 표시."""
+    PANEL_W = 310
+    SCALE   = 1.5
+
+    # overlay 1.5배 확대
+    oh, ow = overlay_bgr.shape[:2]
+    overlay_bgr = cv2.resize(overlay_bgr,
+                             (int(ow * SCALE), int(oh * SCALE)),
+                             interpolation=cv2.INTER_LINEAR)
+
+    img_h = overlay_bgr.shape[0]
+    panel = build_info_panel(img_h, PANEL_W, info)
+    ph    = panel.shape[0]
+
+    if img_h < ph:
+        pad = np.zeros((ph - img_h, overlay_bgr.shape[1], 3), dtype=np.uint8)
+        overlay_bgr = np.vstack([overlay_bgr, pad])
+
+    divider = np.full((ph, 2, 3), 70, dtype=np.uint8)
     canvas  = np.hstack([overlay_bgr, divider, panel])
     cv2.imshow(_WIN, canvas)
     cv2.waitKey(1)
 
 
 def init_monitor(h: int, w: int):
-    """서버 시작 시 대기 화면 초기화."""
-    blank = np.full((h, w, 3), 20, dtype=np.uint8)
+    """Show standby screen on server start."""
+    blank = np.full((h, w, 3), 18, dtype=np.uint8)
     _put(blank, "Waiting for capture command...",
-         w//2-160, h//2, color=(120,120,120), scale=0.6)
-    show_monitor(blank, {"status":"대기 중","frame_idx":0,
+         w//2-160, h//2, color=(110,110,110), scale=0.58)
+    show_monitor(blank, {"status":"Waiting","frame_idx":0,
                          "timestamp":"-","picks":[]})
 
 def mask_nms(results, iou_threshold: float = MASK_IOU_THRESHOLD):
@@ -795,11 +809,13 @@ def run_icp_for_frame(instance_plys, cad_pcd, cad_down, result_dir, frame_name, 
     # ── overlay PNG에 픽포인트 좌표 추가 ─────────────────────────────────────
     if picks_2d:
         overlay_final = draw_picks_on_overlay(bgr_image, picks_2d)
-        overlay_out   = result_dir / f"{frame_name}_overlay.png"
-        cv2.imwrite(str(overlay_out), overlay_final)
-        log(f"  ✓ overlay PNG: {overlay_out.name}")
+    else:
+        overlay_final = bgr_image.copy()
+    overlay_out = result_dir / f"{frame_name}_overlay.png"
+    cv2.imwrite(str(overlay_out), overlay_final)
+    log(f"  ✓ overlay PNG: {overlay_out.name}")
 
-    return icp_results
+    return icp_results, overlay_final
 
 
 # =============================================================================
@@ -894,7 +910,7 @@ def process_one_frame(
 
     meta = save_capture(frame, dirs, frame_idx, cfg_camera)
     s    = meta["stats"]
-    print(f"  캡처 완료: {dt_ms:.1f} ms | valid {s['valid_ratio']:.1f}% | "
+    print(f"  Captured: {dt_ms:.1f} ms | valid {s['valid_ratio']:.1f}% | "
           f"Z {s['z_min_mm']}~{s['z_max_mm']} mm", flush=True)
     _cap_stat = {"capture_ms": dt_ms, "valid_ratio": s["valid_ratio"],
                  "z_min": s["z_min_mm"] or 0, "z_max": s["z_max_mm"] or 0}
@@ -928,7 +944,7 @@ def process_one_frame(
     # ── ICP ─────────────────────────────────────────────────────────────────
     log("  [ICP]")
     t0 = time.perf_counter()
-    icp_results = run_icp_for_frame(
+    icp_results, final_overlay = run_icp_for_frame(
         inst_plys, cad_pcd, cad_down, dirs["results"], frame_name, bgr_image,
         bg_pcd=bg_pcd,
     )
@@ -940,7 +956,7 @@ def process_one_frame(
 
     if not success:
         return {"status": "No",
-                "_overlay": bgr_image, "_cap_stat": _cap_stat,
+                "_overlay": final_overlay, "_cap_stat": _cap_stat,
                 "_info": {"status": "No detection",
                            "det_ms": det_ms, "icp_ms": icp_ms, "picks": []}}
 
@@ -963,8 +979,8 @@ def process_one_frame(
             f"  roll={deg['roll_deg']:.2f}  pitch={deg['pitch_deg']:.2f}  yaw={deg['yaw_deg']:.2f}")
 
     return {"status": "ok", "picks": picks,
-            "_overlay": bgr_image, "_cap_stat": _cap_stat,
-            "_info": {"status": "완료",
+            "_overlay": final_overlay, "_cap_stat": _cap_stat,
+            "_info": {"status": "Done",
                        "det_ms": det_ms, "icp_ms": icp_ms, "picks": picks}}
 
 
@@ -1057,13 +1073,13 @@ def main() -> int:
         with create_camera(cfg["camera"]) as cam:
             for i in range(args.warmup):
                 frame = cam.capture()
-                log(f"    워밍업 {i+1}/{args.warmup}")
+                log(f"    Warmup {i+1}/{args.warmup}")
             cam_ip = cam.current_ip if hasattr(cam, "current_ip") else "N/A"
             log(f"    카메라 IP:   {cam_ip}")
-            log("    ✓ 카메라 준비 완료")
+            log("    Camera ready")
             init_monitor(frame.height, frame.width)
 
-            # ── [4] TCP 서버 시작 ─────────────────────────────────────────────
+            # ── [4] TCP server start ─────────────────────────────────────────────
             server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             server_sock.bind((args.host, args.port))
@@ -1098,7 +1114,7 @@ def main() -> int:
 
                         if cmd == "QUIT":
                             conn.sendall(b"{'ok', 'bye'}\n")
-                            log("  QUIT 수신 — 서버 종료")
+                            log("  QUIT received - server shutting down")
                             conn.close()
                             server_sock.close()
                             cv2.destroyAllWindows()
@@ -1119,9 +1135,9 @@ def main() -> int:
 
                             msg = format_response(payload)
                             conn.sendall((msg + "\n").encode("utf-8"))
-                            log(f"  응답 전송: {msg}")
+                            log(f"  Response sent: {msg}")
 
-                            # ── 시각화 창 업데이트 ─────────────────────
+                            # ── Update visualization window ────────
                             _ov = payload.pop("_overlay", None)
                             _cs = payload.pop("_cap_stat", {})
                             _nf = payload.pop("_info", {})
@@ -1139,7 +1155,7 @@ def main() -> int:
                             }
                             if _ov is not None:
                                 show_monitor(_ov, _vi)
-                            if cv2.waitKey(1) & 0xFF == 27:  # ESC로 창 닫기
+                            if cv2.waitKey(1) & 0xFF == 27:
                                 cv2.destroyAllWindows()
 
                         else:

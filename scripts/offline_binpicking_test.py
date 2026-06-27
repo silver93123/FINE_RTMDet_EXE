@@ -4,16 +4,20 @@
 사전 저장된 파일로 동일한 Detection → ICP → 결과 포맷을 재현합니다.
 
 입력 디렉토리 구조 (--input 경로):
-    <input>/
-        intensity/               *.png            grayscale intensity 이미지
-        pointcloud_organized/    frame_XXXX.npy   H×W×3 float32, mm 단위
-        valid_mask/              frame_XXXX.npy   H×W bool
+    <input>/                                   ← 예) data/captures/live
+        intensity/               *.png          grayscale intensity 이미지
+        pointcloud_organized/    frame_XXXX.npy H×W×3 float32, mm 단위
+        valid_mask/              frame_XXXX.npy H×W bool
 
-  ※ 실제 카메라 촬영 시 --out 경로에 자동 저장되는 구조와 동일합니다.
+  ※ 5_Run_binpicking_TCP.py 가 --out 으로 저장하는 폴더 구조와 완전히 동일합니다.
+     TCP 스크립트의 --out 경로를 그대로 --input 에 넣으면 됩니다.
 
 사용법:
     # 자동 모드 (입력 디렉토리에서 최신 파일 세트 자동 선택)
     python offline_binpicking_test.py
+
+    # 입력 경로 직접 지정 (TCP 저장 폴더를 바로 사용)
+    python offline_binpicking_test.py --input data/captures/live
 
     # 파일 직접 지정
     python offline_binpicking_test.py \\
@@ -152,56 +156,75 @@ def load_frame_from_files(
 
 def find_latest_set(input_dir: Path):
     """
-    input_dir 안의 flat 구조에서 가장 최신 파일 세트를 자동 탐색.
+    input_dir 안의 서브폴더 구조에서 가장 최신 파일 세트를 자동 탐색.
 
-    파일명 규칙 (save_capture 기준):
-        intensity  : 날짜시간.png          예) 20260530_161707.png
-        pcd        : frame_XXXX.npy        예) frame_0010.npy
-        valid_mask : frame_mask_XXXX.npy   예) frame_mask_0010.npy
+    5_Run_binpicking_TCP.py 의 save_capture() 가 저장하는 구조:
+        <input_dir>/
+            intensity/               날짜시간.png       예) 20260530_161707.png
+            pointcloud_organized/    frame_XXXX.npy     예) frame_0010.npy
+            valid_mask/              frame_XXXX.npy     예) frame_0010.npy
     """
+    pcd_dir       = input_dir / "pointcloud_organized"
+    mask_dir      = input_dir / "valid_mask"
+    intensity_dir = input_dir / "intensity"
+
+    for d, label in [(pcd_dir, "pointcloud_organized"),
+                     (mask_dir, "valid_mask"),
+                     (intensity_dir, "intensity")]:
+        if not d.exists():
+            raise FileNotFoundError(
+                f"서브폴더 없음: {d}\n"
+                f"  → TCP 스크립트가 저장한 폴더를 --input 에 지정하세요.")
+
     # pcd 기준으로 최신 frame 번호 결정
     pcds = sorted(
-        [p for p in input_dir.glob("frame_*.npy") if "mask" not in p.name],
+        pcd_dir.glob("frame_*.npy"),
         key=lambda p: p.stat().st_mtime, reverse=True
     )
     if not pcds:
-        raise FileNotFoundError(f"frame_XXXX.npy 없음: {input_dir}")
+        raise FileNotFoundError(f"frame_XXXX.npy 없음: {pcd_dir}")
 
     pcd_npy = pcds[0]
-    # frame_0010 → frame_mask_0010
-    num     = pcd_npy.stem.split("_")[-1]          # "0010"
-    mask_npy = input_dir / f"frame_mask_{num}.npy"
-    if not mask_npy.exists():
-        raise FileNotFoundError(f"frame_mask_{num}.npy 없음: {input_dir}")
+    num     = pcd_npy.stem.split("_")[-1]   # "0010"
 
-    # intensity: 날짜시간.png (frame_ 로 시작하지 않는 PNG)
+    # valid_mask 는 같은 이름 (frame_XXXX.npy)
+    mask_npy = mask_dir / f"frame_{num}.npy"
+    if not mask_npy.exists():
+        raise FileNotFoundError(f"valid_mask/frame_{num}.npy 없음: {mask_dir}")
+
+    # intensity: 가장 최신 PNG
     pngs = sorted(
-        [p for p in input_dir.glob("*.png") if not p.name.startswith("frame_")],
+        intensity_dir.glob("*.png"),
         key=lambda p: p.stat().st_mtime, reverse=True
     )
     if not pngs:
-        raise FileNotFoundError(f"intensity PNG 없음: {input_dir}")
+        raise FileNotFoundError(f"intensity PNG 없음: {intensity_dir}")
 
     return pngs[0], pcd_npy, mask_npy
 
 
 def pick_set_interactive(input_dir: Path):
     """
-    input_dir 안의 파일 목록을 보여주고 pcd 번호를 선택하게 함.
-    선택된 번호에 맞는 (intensity_png, pcd_npy, mask_npy) 세트를 반환.
+    input_dir 안의 서브폴더 파일 목록을 보여주고 세트를 선택하게 함.
+    5_Run_binpicking_TCP.py 가 저장하는 서브폴더 구조를 사용.
     """
-    # pcd 목록 (frame_XXXX.npy, mask 제외)
-    pcds = sorted(
-        [p for p in input_dir.glob("frame_*.npy") if "mask" not in p.name],
-        key=lambda p: p.name
-    )
-    pngs = sorted(
-        [p for p in input_dir.glob("*.png") if not p.name.startswith("frame_")],
-        key=lambda p: p.name
-    )
+    pcd_dir       = input_dir / "pointcloud_organized"
+    mask_dir      = input_dir / "valid_mask"
+    intensity_dir = input_dir / "intensity"
+
+    for d, label in [(pcd_dir, "pointcloud_organized"),
+                     (mask_dir, "valid_mask"),
+                     (intensity_dir, "intensity")]:
+        if not d.exists():
+            raise FileNotFoundError(
+                f"서브폴더 없음: {d}\n"
+                f"  → TCP 스크립트가 저장한 폴더를 --input 에 지정하세요.")
+
+    pcds = sorted(pcd_dir.glob("frame_*.npy"), key=lambda p: p.name)
+    pngs = sorted(intensity_dir.glob("*.png"),  key=lambda p: p.name)
 
     if not pcds:
-        raise FileNotFoundError(f"frame_XXXX.npy 없음: {input_dir}")
+        raise FileNotFoundError(f"frame_XXXX.npy 없음: {pcd_dir}")
 
     print("\n" + "─" * 50)
     print(f"  입력 디렉토리: {input_dir}")
@@ -244,9 +267,9 @@ def pick_set_interactive(input_dir: Path):
                 pass
 
     num      = pcd_npy.stem.split("_")[-1]
-    mask_npy = input_dir / f"frame_mask_{num}.npy"
+    mask_npy = mask_dir / f"frame_{num}.npy"
     if not mask_npy.exists():
-        raise FileNotFoundError(f"frame_mask_{num}.npy 없음: {input_dir}")
+        raise FileNotFoundError(f"valid_mask/frame_{num}.npy 없음: {mask_dir}")
 
     print(f"\n  선택됨:")
     print(f"    intensity : {png.name}")
@@ -869,10 +892,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mask_npy",     type=Path, default=None,
                    help="valid_mask .npy 경로 (직접 지정 시)")
     p.add_argument("--input",        type=Path,
-                   default=ROOT / "data" / "offline_input",
-                   help="입력 디렉토리 (PNG + frame_XXXX.npy + frame_mask_XXXX.npy 가 flat하게 위치)")
+                   default=ROOT / "data" / "offline_input" ,
+                   help="입력 디렉토리 (TCP 스크립트 --out 경로와 동일한 서브폴더 구조)")
     p.add_argument("--out",          type=Path,
-                   default=ROOT / "data" / "captures" / "live",
+                   default=ROOT / "data" / "offline_output",
                    help="결과 저장 루트 (results/ 하위에 생성됨)")
     p.add_argument("--interactive",  action="store_true",
                    help="파일을 직접 골라가며 반복 실행")
@@ -898,7 +921,8 @@ def main() -> int:
     print(f"  Checkpoint : {CHECKPOINT_PATH.name}")
     print(f"  CAD        : {CAD_PATH.name}")
     print(f"  입력       : {args.input}")
-    print(f"  출력       : {args.out}")
+    print(f"    intensity/            pointcloud_organized/  valid_mask/")
+    print(f"  결과       : {args.out / 'results'}")
     print("=" * 70)
 
     # ── [1] 모델 로드 ─────────────────────────────────────────────────────────
