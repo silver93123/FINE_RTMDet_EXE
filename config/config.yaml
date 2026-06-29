@@ -28,7 +28,7 @@ camera:
   connect_timeout_ms: 5000
   capture_timeout_ms: 2000
   
-  valid_z_range_mm: [450.0, 900.0]
+  valid_z_range_mm: [300.0, 900.0]
 
 # 빈(상자) 워크스페이스 영역 - 이 박스 밖의 점은 자동 제거됨
 # 카메라 좌표계 기준 (mm). 실제 셋업 후 조정 필요.
@@ -37,7 +37,7 @@ workspace_bounds:
   x_max:  300.0
   y_min: -300.0
   y_max:  300.0
-  z_min:  500.0   # 카메라로부터 최소 거리
+  z_min:  300.0   # 카메라로부터 최소 거리
   z_max: 1500.0   # 카메라로부터 최대 거리
 
 paths:

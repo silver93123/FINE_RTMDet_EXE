@@ -39,8 +39,10 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import queue
 import socket
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -84,7 +86,7 @@ CHECKPOINT_PATH = _candidates[-1]
 
 SCORE_THRESHOLD        = 0.3
 MIN_POINTS_PER_INSTANCE = 100
-MASK_IOU_THRESHOLD     = 0.6
+MASK_IOU_THRESHOLD     = 0.5
 
 # ── ICP ───────────────────────────────────────────────────────────────────────
 CAD_PATH           = ROOT / "data" / "cad" / "bracket_v2.stl"
@@ -102,9 +104,9 @@ ICP_STAGES = [
 
 ICP_FITNESS_THRESHOLD = 0.5
 XYZ_MAX_M             = 2.0
-CAD_AXIS_CORRECTION_DEG = (-90, 90, 90)
+CAD_AXIS_CORRECTION_DEG = (0, 90, 90)
 
-# ── ICP 고정 초기 자세 ────────────────────────────────────────────────
+# ── [패치] ICP 고정 초기 자세 ────────────────────────────────────────────────
 # 브라켓이 항상 특정 자세에서 크게 벗어나지 않을 때 사용합니다.
 # 정상 케이스 로그(roll/pitch/yaw)를 수 회 관찰한 평균값을 입력하세요.
 # 적용 순서: Rz(yaw) @ Ry(pitch) @ Rx(roll)
@@ -112,18 +114,26 @@ ICP_INIT_ROLL_DEG  =  0.0   # [deg] 브라켓 초기 roll  (관찰 평균값으�
 ICP_INIT_PITCH_DEG =  0.0   # [deg] 브라켓 초기 pitch (관찰 평균값으로 교체)
 ICP_INIT_YAW_DEG   =  0.0   # [deg] 브라켓 초기 yaw   (관찰 평균값으로 교체)
 
-# ── ICP 회전 구속 조건 ─────────────────────────────────────────────────
+# ── [패치] ICP 회전 구속 조건 ─────────────────────────────────────────────────
 # ICP 결과 roll/pitch/yaw 가 허용 범위를 벗어나면 기각합니다.
 # 정상 케이스 로그를 수 회 관찰한 뒤 최댓값 + 여유 ±10° 로 설정하세요.
-ICP_ROLL_RANGE  = (-30.0,  30.0)   # [deg] 허용 roll  범위
-ICP_PITCH_RANGE = (-30.0,  30.0)   # [deg] 허용 pitch 범위
-ICP_YAW_RANGE   = (-180.0, 180.0)  # [deg] yaw 는 360° 자유 (필요 시 좁히세요)
+ICP_ROLL_RANGE  = (-45.0, 45.0)  # [deg] 허용 roll  범위 ★ 튜닝 후 좁히세요
+ICP_PITCH_RANGE = (-45.0, 45.0)  # [deg] 허용 pitch 범위 ★ 튜닝 후 좁히세요
+ICP_YAW_RANGE   = (-45.0, 45.0)  # [deg] yaw 는 360° 자유 (필요 시 좁히세요)
 
 # ── 픽포인트 ──────────────────────────────────────────────────────────────────
 CAD_PICK_LOCAL   = np.array([0.000, -0.100, 0.031, 1.0])
-PICK_OFFSET_X_MM = -5.0
-PICK_OFFSET_Y_MM =  0.0
+PICK_OFFSET_X_MM =  15.0
+PICK_OFFSET_Y_MM =  15.0
 PICK_OFFSET_Z_MM =  0.0
+
+# 오버레이 십자선 2D 위치 = ICP 역탐색 픽셀 * (1 - W) + 마스크 중심 픽셀 * W
+# 0.0 = ICP 100%,  1.0 = 마스크 중심 100%
+PICK_2D_MASK_WEIGHT = 0.7   # 마스크 중심 비율 (ICP 30% + 마스크 70%)
+
+# ── TCP 서버 ──────────────────────────────────────────────────────────────────
+TCP_HOST = "192.168.0.22"  # 비전 PC IP (로봇이 접속하는 주소)
+TCP_PORT = 29999           # TCP 포트
 
 # ── 색상 팔레트 ───────────────────────────────────────────────────────────────
 _PALETTE_BGR = np.array([
@@ -245,6 +255,37 @@ def overlay_results(image_bgr, results, valid_mask=None):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
     return overlay
 
+def pick_to_pixel(pick_mm: list, pcd_organized: np.ndarray,
+                  valid_mask: np.ndarray, fallback_xy: tuple) -> tuple[int, int]:
+    """픽포인트 3D 좌표(mm)를 organized PCD에서 역탐색해 픽셀 좌표로 변환.
+
+    pcd_organized : (H, W, 3) float32, mm 단위
+    valid_mask    : (H, W) bool
+    fallback_xy   : 탐색 실패 시 반환할 (px, py) — bbox 중심
+
+    Returns:
+        (px, py) 픽셀 좌표 (int)
+    """
+    target = np.array(pick_mm, dtype=np.float32)          # (3,)
+    H, W   = pcd_organized.shape[:2]
+
+    # valid 픽셀만 대상으로 탐색
+    vr, vc = np.where(valid_mask)
+    if len(vr) == 0:
+        return fallback_xy
+
+    pts = pcd_organized[vr, vc]                            # (N, 3)
+    diff = pts - target                                    # (N, 3)
+    dist = (diff ** 2).sum(axis=1)                        # (N,)
+    idx  = int(np.argmin(dist))
+
+    # 최근접 거리가 너무 멀면 (>50mm) fallback
+    if dist[idx] > 50.0 ** 2:
+        return fallback_xy
+
+    return int(vc[idx]), int(vr[idx])   # (px, py) = (col, row)
+
+
 def draw_picks_on_overlay(image_bgr: np.ndarray, picks_2d: list) -> np.ndarray:
     out   = image_bgr.copy()
     H, W  = out.shape[:2]
@@ -327,8 +368,18 @@ def build_info_panel(h: int, w: int, info: dict) -> np.ndarray:
     row(f"Total : {total:.0f} ms", y, color=(255, 200, 60)); y += lh + 2
     sep(y); y += lh
 
-    picks = info.get("picks", [])
-    section(f"[ Results : {len(picks)} obj(s) ]", y); y += lh
+    picks       = info.get("picks", [])
+    n_det_info  = info.get("num_detected", "-")
+    n_icp_info  = info.get("num_icp_ok",   len(picks))
+    section(f"[ Results : ICP {n_icp_info} obj(s) ]", y); y += lh
+    # RTMDet 검출 카운트
+    det_color = (60, 220, 60) if n_det_info != "-" and int(str(n_det_info)) > 0 \
+                else (120, 120, 120)
+    row(f" RTMDet : {n_det_info} detected", y, color=det_color); y += lh - 2
+    row(f" ICP OK : {n_icp_info} / {n_det_info}", y,
+        color=(60, 220, 60) if n_icp_info and int(str(n_icp_info)) > 0
+              else (100, 100, 220)); y += lh
+    sep(y, c=(45, 45, 45)); y += lh - 4
     if not picks:
         row(" No objects detected", y, color=(100, 100, 220))
     else:
@@ -352,7 +403,18 @@ def build_info_panel(h: int, w: int, info: dict) -> np.ndarray:
          x0, ph - 8, color=(80, 80, 80), scale=0.37)
     return panel
 
-def show_monitor(overlay_bgr: np.ndarray, info: dict):
+# =============================================================================
+# GUI 스레드 — cv2.imshow 는 반드시 메인(또는 단일 고정) 스레드에서 호출해야
+# "응답없음" 문제가 발생하지 않음.
+# TCP 처리 스레드에서 _gui_queue 에 (overlay, info) 를 put 하면
+# GUI 스레드가 루프에서 꺼내 imshow 처리.
+# =============================================================================
+_gui_queue: queue.Queue = queue.Queue(maxsize=2)
+_gui_stop  = threading.Event()
+
+
+def _render_frame(overlay_bgr: np.ndarray, info: dict):
+    """실제 imshow 렌더링 — GUI 스레드 전용."""
     PANEL_W = 310
     SCALE   = 1.5
     oh, ow  = overlay_bgr.shape[:2]
@@ -368,7 +430,35 @@ def show_monitor(overlay_bgr: np.ndarray, info: dict):
     divider = np.full((ph, 2, 3), 70, dtype=np.uint8)
     canvas  = np.hstack([overlay_bgr, divider, panel])
     cv2.imshow(_WIN, canvas)
-    cv2.waitKey(1)
+
+
+def gui_loop():
+    """GUI 전용 스레드 — imshow + waitKey 를 여기서만 호출."""
+    while not _gui_stop.is_set():
+        try:
+            overlay_bgr, info = _gui_queue.get(timeout=0.05)
+            _render_frame(overlay_bgr, info)
+        except queue.Empty:
+            pass
+        key = cv2.waitKey(1) & 0xFF
+        if key == 27:          # ESC → 창만 닫기
+            cv2.destroyAllWindows()
+    cv2.destroyAllWindows()
+
+
+def show_monitor(overlay_bgr: np.ndarray, info: dict):
+    """TCP / 처리 스레드에서 호출 — 큐에 넣기만 함."""
+    try:
+        # 가득 차 있으면 오래된 것 버리고 최신 것으로 교체
+        if _gui_queue.full():
+            try:
+                _gui_queue.get_nowait()
+            except queue.Empty:
+                pass
+        _gui_queue.put_nowait((overlay_bgr.copy(), info))
+    except Exception:
+        pass
+
 
 def init_monitor(h: int, w: int):
     blank = np.full((h, w, 3), 18, dtype=np.uint8)
@@ -691,7 +781,8 @@ def build_icp_elements(scene_pcd, cad_pcd, T, pick, inst_color):
 # ICP 프레임 처리  ★ 핵심 변경 부분
 # =============================================================================
 def run_icp_for_frame(instance_plys, cad_pcd, cad_down,
-                      result_dir, frame_name, bgr_image, bg_pcd=None):
+                      result_dir, frame_name, bgr_image,
+                      pcd_organized=None, valid_mask=None, bg_pcd=None):
     icp_results  = []
     picks_2d     = []
     combined_pcd = bg_pcd if bg_pcd is not None else o3d.geometry.PointCloud()
@@ -760,7 +851,20 @@ def run_icp_for_frame(instance_plys, cad_pcd, cad_down,
 
         inst_color   = _PALETTE_RGB_FLOAT[inst_idx % len(_PALETTE_RGB_FLOAT)].tolist()
         combined_pcd += build_icp_elements(scene_pcd, cad_pcd, T, pick, inst_color)
-        picks_2d.append((cx_2d, cy_2d, pick, float(fit), bbox))
+        # 오버레이 2D 위치: ICP 역탐색 픽셀 * (1-W) + 마스크 중심 픽셀 * W
+        if pcd_organized is not None and valid_mask is not None:
+            icp_px, icp_py = pick_to_pixel(
+                pick["position_mm"], pcd_organized, valid_mask,
+                fallback_xy=(int(cx_2d), int(cy_2d)))
+        else:
+            icp_px, icp_py = int(cx_2d), int(cy_2d)
+        w = PICK_2D_MASK_WEIGHT
+        px_2d = int(round(icp_px * (1.0 - w) + cx_2d * w))
+        py_2d = int(round(icp_py * (1.0 - w) + cy_2d * w))
+        log(f"   2D 픽포인트: ICP({icp_px},{icp_py}) x{1-w:.0%}"
+            f" + 마스크({int(cx_2d)},{int(cy_2d)}) x{w:.0%}"
+            f" = ({px_2d},{py_2d})")
+        picks_2d.append((px_2d, py_2d, pick, float(fit), bbox))
 
         result = {
             "instance_id":  inst_idx,
@@ -871,30 +975,36 @@ def process_one_frame(cam, dirs, frame_idx, cfg_camera,
         frame_name, gray, pcd_organized, valid_mask,
         inferencer, dirs["results"])
     det_ms = (time.perf_counter() - t0) * 1000.0
-    print(f" 검출: {summary['num_detected']}개 PCD: {summary['num_with_pcd']}개"
-          f" ({det_ms:.0f} ms)", flush=True)
+    n_det = summary['num_detected']
+    n_pcd = summary['num_with_pcd']
+    log(f" [RTMDet] 검출: {n_det}개  유효 PCD: {n_pcd}개  ({det_ms:.0f} ms)")
 
     if not inst_plys:
-        log(" 브라켓 없음")
+        log(f" 브라켓 없음 (RTMDet 검출: {n_det}개)")
         return {"status": "No",
                 "_overlay": bgr_image, "_cap_stat": _cap_stat,
                 "_info": {"status": "No detection",
+                          "num_detected": n_det, "num_icp_ok": 0,
                           "det_ms": det_ms, "icp_ms": 0, "picks": []}}
 
     log(" [ICP]")
     t0 = time.perf_counter()
     icp_results, final_overlay = run_icp_for_frame(
         inst_plys, cad_pcd, cad_down, dirs["results"],
-        frame_name, bgr_image, bg_pcd=bg_pcd)
+        frame_name, bgr_image,
+        pcd_organized=pcd_organized, valid_mask=valid_mask,
+        bg_pcd=bg_pcd)
     icp_ms  = (time.perf_counter() - t0) * 1000.0
     success = [r for r in icp_results if "error" not in r]
     n_fail  = len(icp_results) - len(success)
-    log(f" ICP: 성공 {len(success)}개 실패 {n_fail}개 ({icp_ms:.0f} ms)")
+    log(f" [ICP]  성공: {len(success)}개  실패: {n_fail}개  ({icp_ms:.0f} ms)")
+    log(f"        RTMDet {n_det}개 → 유효PCD {n_pcd}개 → ICP성공 {len(success)}개")
 
     if not success:
         return {"status": "No",
                 "_overlay": final_overlay, "_cap_stat": _cap_stat,
                 "_info": {"status": "No detection",
+                          "num_detected": n_det, "num_icp_ok": 0,
                           "det_ms": det_ms, "icp_ms": icp_ms, "picks": []}}
 
     picks = [{"position_mm":  r["pick_point"]["position_mm"],
@@ -913,6 +1023,7 @@ def process_one_frame(cam, dirs, frame_idx, cfg_camera,
     return {"status": "ok", "picks": picks,
             "_overlay": final_overlay, "_cap_stat": _cap_stat,
             "_info": {"status": "Done",
+                      "num_detected": n_det, "num_icp_ok": len(success),
                       "det_ms": det_ms, "icp_ms": icp_ms, "picks": picks}}
 
 # =============================================================================
@@ -923,10 +1034,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--config",  type=Path, default=ROOT / "config" / "config.yaml")
     p.add_argument("--out",     type=Path, default=ROOT / "data" / "captures" / "live")
     p.add_argument("--warmup",  type=int,  default=3)
-    p.add_argument("--host",    type=str,  default="0.0.0.0",
-                   help="TCP 바인드 주소 (기본: 0.0.0.0 = 모든 인터페이스)")
-    p.add_argument("--port",    type=int,  default=29999,
-                   help="TCP 포트 (기본: 29999)")
+    p.add_argument("--host",    type=str,  default=TCP_HOST,
+                   help=f"TCP 바인드 주소 (기본: {TCP_HOST})")
+    p.add_argument("--port",    type=int,  default=TCP_PORT,
+                   help=f"TCP 포트 (기본: {TCP_PORT})")
     return p.parse_args()
 
 # =============================================================================
@@ -961,6 +1072,7 @@ def main():
     # ── 카메라 초기화 ──────────────────────────────────────────────────────
     log("카메라 초기화 중...")
     cam = create_camera(cfg_camera)
+    cam.open()
     log(f"카메라 IP: {getattr(cam, 'ip', 'N/A')}")
 
     log(f"워밍업 {args.warmup}프레임...")
@@ -970,6 +1082,10 @@ def main():
     # 모니터 창 초기화
     dummy = cam.capture()
     init_monitor(dummy.height, dummy.width)
+
+    # ── GUI 스레드 시작 ────────────────────────────────────────────────────
+    gui_thread = threading.Thread(target=gui_loop, name="gui", daemon=True)
+    gui_thread.start()
 
     # ── TCP 서버 ───────────────────────────────────────────────────────────
     frame_idx = 0
@@ -989,10 +1105,6 @@ def main():
             log(f"연결: {addr}")
             try:
                 while True:
-                    key = cv2.waitKey(1) & 0xFF
-                    if key == 27:           # ESC
-                        cv2.destroyAllWindows()
-
                     cmd = recv_command(conn)
                     if not cmd:
                         log("연결 종료 (클라이언트)")
@@ -1029,6 +1141,7 @@ def main():
                             info.update({"frame_idx": frame_idx,
                                          "timestamp": _ts,
                                          **cs})
+                            # num_detected/num_icp_ok 는 _info 안에 포함됨
                             if overlay is not None:
                                 show_monitor(overlay, info)
 
@@ -1046,7 +1159,14 @@ def main():
     except KeyboardInterrupt:
         log("\nKeyboardInterrupt → 종료")
     finally:
+        _gui_stop.set()
+        gui_thread.join(timeout=2.0)
         srv.close()
+        try:
+            cam.close()
+            log("카메라 닫힘")
+        except Exception:
+            pass
         cv2.destroyAllWindows()
 
 
