@@ -9,6 +9,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from scripts.bp_settings import (
+    SAVE_INTENSITY, SAVE_POINTCLOUD, SAVE_VALID_MASK, SAVE_METADATA,
+)
+
 
 # =============================================================================
 # 로거
@@ -63,11 +67,14 @@ def save_capture(frame, dirs: dict, idx: int, cfg_camera: dict) -> dict:
     fname_mask      = f"mask_{dt_name}.npy"
     fname_meta      = f"metadata_{dt_name}.json"
 
-    cv2.imwrite(str(dirs["intensity"] / fname_intensity), frame.intensity)
-    np.save(dirs["pointcloud_organized"] / fname_pcd,
-            frame.points_organized.astype(np.float32))
-    np.save(dirs["valid_mask"] / fname_mask,
-            frame.valid_mask.astype(bool))
+    if SAVE_INTENSITY:
+        cv2.imwrite(str(dirs["intensity"] / fname_intensity), frame.intensity)
+    if SAVE_POINTCLOUD:
+        np.save(dirs["pointcloud_organized"] / fname_pcd,
+                frame.points_organized.astype(np.float32))
+    if SAVE_VALID_MASK:
+        np.save(dirs["valid_mask"] / fname_mask,
+                frame.valid_mask.astype(bool))
 
     pts       = frame.points
     valid_cnt = int(frame.valid_mask.sum())
@@ -99,6 +106,7 @@ def save_capture(frame, dirs: dict, idx: int, cfg_camera: dict) -> dict:
             "valid_mask":           f"valid_mask/{fname_mask}",
         },
     }
-    with (dirs["metadata"] / fname_meta).open("w", encoding="utf-8") as f:
-        json.dump(metadata, f, indent=2, ensure_ascii=False)
+    if SAVE_METADATA:
+        with (dirs["metadata"] / fname_meta).open("w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2, ensure_ascii=False)
     return metadata

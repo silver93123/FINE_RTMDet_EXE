@@ -19,6 +19,7 @@ from scripts.bp_settings import (
     PICK_OFFSET_X_MM, PICK_OFFSET_Y_MM, PICK_OFFSET_Z_MM,
     PICK_2D_MASK_WEIGHT, HEIGHT_POINT_OFFSET_Y_MM,
     _PALETTE_RGB_FLOAT,
+    SAVE_COLORED_PLY, SAVE_RESULT_JSON, SAVE_OVERLAY_PNG,
 )
 from scripts.bp_logger import log
 from scripts.bp_detection import (
@@ -379,24 +380,26 @@ def run_icp_for_frame(instance_plys, cad_pcd, cad_down,
         icp_results.append(result)
         ply_path.unlink(missing_ok=True)
 
-    if len(np.asarray(combined_pcd.points)) > 0:
+    if SAVE_COLORED_PLY and len(np.asarray(combined_pcd.points)) > 0:
         ply_out = result_dir / f"{frame_name}_colored.ply"
         o3d.io.write_point_cloud(str(ply_out), combined_pcd, write_ascii=False)
         log(f"   ✓ 통합 PLY: {ply_out.name}")
 
-    success  = [r for r in icp_results if "error" not in r]
-    json_out = result_dir / f"{frame_name}_result.json"
-    with json_out.open("w", encoding="utf-8") as f:
-        json.dump({"frame": frame_name,
-                   "num_total":   len(icp_results),
-                   "num_success": len(success),
-                   "instances":   icp_results},
-                  f, indent=2, ensure_ascii=False)
-    log(f"   ✓ 통합 JSON: {json_out.name}")
+    if SAVE_RESULT_JSON:
+        success  = [r for r in icp_results if "error" not in r]
+        json_out = result_dir / f"{frame_name}_result.json"
+        with json_out.open("w", encoding="utf-8") as f:
+            json.dump({"frame": frame_name,
+                       "num_total":   len(icp_results),
+                       "num_success": len(success),
+                       "instances":   icp_results},
+                      f, indent=2, ensure_ascii=False)
+        log(f"   ✓ 통합 JSON: {json_out.name}")
 
     overlay_final = draw_picks_on_overlay(bgr_image, picks_2d) if picks_2d \
                     else bgr_image.copy()
-    cv2.imwrite(str(result_dir / f"{frame_name}_overlay.png"), overlay_final)
-    log(f"   ✓ overlay PNG: {frame_name}_overlay.png")
+    if SAVE_OVERLAY_PNG:
+        cv2.imwrite(str(result_dir / f"{frame_name}_overlay.png"), overlay_final)
+        log(f"   ✓ overlay PNG: {frame_name}_overlay.png")
 
     return icp_results, overlay_final

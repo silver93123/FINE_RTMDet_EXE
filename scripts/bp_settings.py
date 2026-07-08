@@ -80,8 +80,21 @@ HEIGHT_POINT_OFFSET_Y_MM = 15.0
 # =============================================================================
 # TCP 서버
 # =============================================================================
-TCP_HOST = "0.0.0.0"
+TCP_HOST = "192.168.0.22"
 TCP_PORT = 29999
+
+# =============================================================================
+# 저장 옵션 (True = 저장, False = 저장 안 함)
+# =============================================================================
+SAVE_INTENSITY       = True   # intensity/*.png         캡처 강도 이미지
+SAVE_POINTCLOUD      = False  # pointcloud_organized/*.npy  원시 포인트클라우드
+SAVE_VALID_MASK      = False  # valid_mask/*.npy         유효 픽셀 마스크
+SAVE_METADATA        = True   # metadata/*.json          캡처 메타데이터
+SAVE_OVERLAY_PNG     = True   # results/*_overlay.png   Detection+픽포인트 오버레이
+SAVE_COLORED_PLY     = False  # results/*_colored.ply   컬러 포인트클라우드
+SAVE_INSTANCE_PLY    = False  # results/*_obj*.ply      인스턴스별 포인트클라우드
+SAVE_RESULT_JSON     = False  # results/*_result.json   ICP 결과 JSON
+SAVE_PICK_LOG_CSV    = True   # pick_log.csv            픽포인트 CSV 로그
 
 # =============================================================================
 # 색상 팔레트

@@ -13,6 +13,7 @@ from scripts.bp_settings import (
     MIN_POINTS_PER_INSTANCE, MASK_IOU_THRESHOLD,
     PICK_Z_NEIGHBOR_OFFSETS,
     _PALETTE_BGR, _PALETTE_RGB_FLOAT, _BG_COLOR,
+    SAVE_OVERLAY_PNG, SAVE_COLORED_PLY, SAVE_INSTANCE_PLY, SAVE_PICK_LOG_CSV,
 )
 from scripts.bp_logger import log
 
@@ -111,6 +112,8 @@ PICK_LOG_FIELDS = [
 
 
 def append_pick_log_csv(csv_path: Path, row: dict) -> None:
+    if not SAVE_PICK_LOG_CSV:
+        return
     is_new = not csv_path.exists()
     with csv_path.open("a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=PICK_LOG_FIELDS)
@@ -282,10 +285,12 @@ def run_detection(frame_name, gray, pcd_organized, valid_mask, inferencer, resul
         print(f" [NMS] score={rem.score:.2f} 제거 "
               f"(IoU={iou:.2f}, winner score={winner.score:.2f})", flush=True)
 
-    cv2.imwrite(str(result_dir / f"{frame_name}_overlay.png"),
-                overlay_results(bgr, results, valid_mask))
-    save_colored_full_pcd(pcd_organized, valid_mask, results,
-                          result_dir / f"{frame_name}_colored.ply")
+    if SAVE_OVERLAY_PNG:
+        cv2.imwrite(str(result_dir / f"{frame_name}_overlay.png"),
+                    overlay_results(bgr, results, valid_mask))
+    if SAVE_COLORED_PLY:
+        save_colored_full_pcd(pcd_organized, valid_mask, results,
+                              result_dir / f"{frame_name}_colored.ply")
 
     instances_info, instance_plys = [], []
     for i, r in enumerate(results):
@@ -300,7 +305,8 @@ def run_detection(frame_name, gray, pcd_organized, valid_mask, inferencer, resul
             continue
         color_rgb = tuple(_PALETTE_RGB_FLOAT[i % len(_PALETTE_RGB_FLOAT)].tolist())
         ply_path  = result_dir / f"{frame_name}_obj{i}.ply"
-        ok        = save_instance_pcd(obj_pts, ply_path, color=color_rgb)
+        ok        = save_instance_pcd(obj_pts, ply_path, color=color_rgb) \
+                    if SAVE_INSTANCE_PLY else ply_path.touch() or True
         center    = obj_pts.mean(axis=0)
         size      = obj_pts.max(axis=0) - obj_pts.min(axis=0)
         cx_2d     = float((r.bbox[0] + r.bbox[2]) / 2)
