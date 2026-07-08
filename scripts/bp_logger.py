@@ -54,6 +54,7 @@ def setup_dirs(out_dir: Path) -> dict:
         "valid_mask":           out_dir / "valid_mask",
         "metadata":             out_dir / "metadata",
         "results":              out_dir / "results",
+        "tmp":                  out_dir / "tmp",   # ICP 임시 PLY (매 프레임 덮어씀)
     }
     for p in subdirs.values():
         p.mkdir(parents=True, exist_ok=True)

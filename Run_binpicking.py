@@ -98,7 +98,7 @@ def process_one_frame(cam, dirs, frame_idx, cfg_camera,
     t0 = time.perf_counter()
     summary, inst_plys, bgr_image, bg_pcd = run_detection(
         frame_name, gray, pcd_organized, valid_mask,
-        inferencer, dirs["results"])
+        inferencer, dirs["results"], dirs["tmp"])
     det_ms = (time.perf_counter() - t0) * 1000.0
     n_det  = summary["num_detected"]
     n_pcd  = summary["num_with_pcd"]

@@ -17,7 +17,6 @@ from scripts.bp_settings import (
 )
 from scripts.bp_logger import log
 
-
 # =============================================================================
 # Detection 오버레이
 # =============================================================================
@@ -41,7 +40,6 @@ def overlay_results(image_bgr, results, valid_mask=None):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
     return overlay
 
-
 # =============================================================================
 # 픽셀 ↔ 3D 포인트 변환
 # =============================================================================
@@ -59,7 +57,6 @@ def pick_to_pixel(pick_mm: list, pcd_organized: np.ndarray,
         return fallback_xy
     return int(vc[idx]), int(vr[idx])
 
-
 def pixel_to_point(px: float, py: float, pcd_organized: np.ndarray,
                    valid_mask: np.ndarray):
     H, W = pcd_organized.shape[:2]
@@ -74,7 +71,6 @@ def pixel_to_point(px: float, py: float, pcd_organized: np.ndarray,
     idx = int(np.argmin(d2))
     return pcd_organized[vr[idx], vc[idx]].astype(np.float64).copy()
 
-
 def robust_z_from_neighbors(px: float, py: float, pcd_organized: np.ndarray,
                              valid_mask: np.ndarray):
     H, W = pcd_organized.shape[:2]
@@ -88,7 +84,6 @@ def robust_z_from_neighbors(px: float, py: float, pcd_organized: np.ndarray,
     if not zs:
         return None, 0
     return float(np.median(zs)), len(zs)
-
 
 # =============================================================================
 # CSV 로깅
@@ -110,7 +105,6 @@ PICK_LOG_FIELDS = [
     "height_z_neighbor_count", "height_z_is_fallback",
 ]
 
-
 def append_pick_log_csv(csv_path: Path, row: dict) -> None:
     if not SAVE_PICK_LOG_CSV:
         return
@@ -120,7 +114,6 @@ def append_pick_log_csv(csv_path: Path, row: dict) -> None:
         if is_new:
             writer.writeheader()
         writer.writerow({k: row.get(k, "") for k in PICK_LOG_FIELDS})
-
 
 def build_pick_log_row(frame_name, inst_idx, det_score,
                        status, error_msg="",
@@ -176,7 +169,6 @@ def build_pick_log_row(frame_name, inst_idx, det_score,
         })
     return row
 
-
 # =============================================================================
 # 오버레이 픽포인트 표시
 # =============================================================================
@@ -212,7 +204,6 @@ def draw_picks_on_overlay(image_bgr: np.ndarray, picks_2d: list) -> np.ndarray:
                     font, font_scale, (200, 200, 200), thickness, cv2.LINE_AA)
     return out
 
-
 # =============================================================================
 # 마스크 NMS
 # =============================================================================
@@ -241,7 +232,6 @@ def mask_nms(results, iou_threshold: float = MASK_IOU_THRESHOLD):
                 removed.append((rj, ri, float(iou)))
     return keep, removed
 
-
 # =============================================================================
 # PCD 저장
 # =============================================================================
@@ -253,7 +243,6 @@ def save_instance_pcd(points, out_path, color):
     pcd.colors = o3d.utility.Vector3dVector(
         np.tile(np.array(color, dtype=np.float64), (len(points), 1)))
     return bool(o3d.io.write_point_cloud(str(out_path), pcd, write_ascii=False))
-
 
 def save_colored_full_pcd(pcd_organized, valid_mask, results, out_path):
     all_pts = pcd_organized[valid_mask]
@@ -273,11 +262,10 @@ def save_colored_full_pcd(pcd_organized, valid_mask, results, out_path):
     pcd.colors = o3d.utility.Vector3dVector(colors)
     return bool(o3d.io.write_point_cloud(str(out_path), pcd, write_ascii=False))
 
-
 # =============================================================================
 # Detection 실행
 # =============================================================================
-def run_detection(frame_name, gray, pcd_organized, valid_mask, inferencer, result_dir):
+def run_detection(frame_name, gray, pcd_organized, valid_mask, inferencer, result_dir, tmp_dir):
     bgr = np.stack([gray, gray, gray], axis=-1)
 
     results, nms_removed = mask_nms(inferencer.infer(bgr))
@@ -304,9 +292,10 @@ def run_detection(frame_name, gray, pcd_organized, valid_mask, inferencer, resul
             })
             continue
         color_rgb = tuple(_PALETTE_RGB_FLOAT[i % len(_PALETTE_RGB_FLOAT)].tolist())
-        ply_path  = result_dir / f"{frame_name}_obj{i}.ply"
-        ok        = save_instance_pcd(obj_pts, ply_path, color=color_rgb) \
-                    if SAVE_INSTANCE_PLY else ply_path.touch() or True
+        # tmp_dir 에 저장 → 매 프레임 덮어씀, ICP 처리 후 자동 삭제
+        ply_path  = tmp_dir / f"obj{i}.ply"
+        ok        = save_instance_pcd(obj_pts, ply_path, color=color_rgb)
+
         center    = obj_pts.mean(axis=0)
         size      = obj_pts.max(axis=0) - obj_pts.min(axis=0)
         cx_2d     = float((r.bbox[0] + r.bbox[2]) / 2)
