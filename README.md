@@ -424,4 +424,4 @@ data/captures/binpicking.log
   [frame_0001] 캡처 중...  2026-05-22 17:13:55
   검출: 2개  ICP: 성공 2개
   응답 전송: {'ok', 2, (-74.4, 3.3, 571.3, ...), (...)}
-```
+```# FINE_RTMDet_EXE
