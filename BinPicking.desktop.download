@@ -1,9 +1,0 @@
-[Desktop Entry]
-Version=1.0
-Type=Application
-Name=BinPicking
-Comment=FINE Bin Picking Vision System
-Exec=bash -c "source /home/fine/miniconda3/etc/profile.d/conda.sh && conda activate vision_env && cd /home/fine/FINE_RTMDet_EXE && python -c 'from scripts.Run_binpicking_TCP_UI import main; main()' 2>&1 | tee -a /home/fine/FINE_RTMDet_EXE/binpicking.log; read -p '종료. 엔터를 누르세요...'"
-Icon=utilities-terminal
-Terminal=true
-StartupNotify=false
