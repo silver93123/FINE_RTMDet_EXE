@@ -22,9 +22,20 @@ import numpy as np
 import os
 
 # =============================================================================
+# scripts/__init__.py 자동 생성
+# scripts/ 를 Python 패키지로 인식시키기 위해 필요
+# (없으면 'from scripts.Run_binpicking_TCP_UI import main' 실행 시 오류)
+# =============================================================================
+scripts_init = "scripts/__init__.py"
+if not os.path.exists(scripts_init):
+    open(scripts_init, "w").close()
+    print(f"[CREATE] {scripts_init}")
+
+# =============================================================================
 # 컴파일 대상 파일 목록
 # =============================================================================
 TARGETS = [
+    "scripts/__init__.py",
     "scripts/Run_binpicking_TCP_UI.py",
     "src/camera/__init__.py",
     "src/camera/base.py",
@@ -43,6 +54,7 @@ for target in TARGETS:
         continue
 
     # 경로 → 모듈명 변환
+    # scripts/__init__.py               → scripts
     # scripts/Run_binpicking_TCP_UI.py  → scripts.Run_binpicking_TCP_UI
     # src/camera/__init__.py            → src.camera
     # src/camera/base.py                → src.camera.base
