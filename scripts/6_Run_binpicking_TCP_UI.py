@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import csv
 import json
 import queue
 import socket
@@ -130,6 +131,14 @@ PICK_OFFSET_Z_MM =  0.0
 # 오버레이 십자선 2D 위치 = ICP 역탐색 픽셀 * (1 - W) + 마스크 중심 픽셀 * W
 # 0.0 = ICP 100%,  1.0 = 마스크 중심 100%
 PICK_2D_MASK_WEIGHT = 0.5   # 마스크 중심 비율 (ICP 30% + 마스크 70%)
+
+# 최종 Z값 계산용 이웃 패턴: 블렌딩된 XY에 대응하는 픽셀 기준 (dx, dy) 오프셋 목록.
+# 기본값 = 중심 + 상하좌우 5포인트(plus 모양). 단일 픽셀 depth 노이즈 완충용 median 계산에 사용.
+PICK_Z_NEIGHBOR_OFFSETS = [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)]
+
+# 부품 높이 측정용 보조 포인트: 픽포인트로부터 Y방향 오프셋된 위치.
+# Z는 픽포인트와 동일한 방식(실측 PCD 5포인트 median)으로 산출한다.
+HEIGHT_POINT_OFFSET_Y_MM = 15.0
 
 # ── TCP 서버 ──────────────────────────────────────────────────────────────────
 TCP_HOST = "192.168.0.22"  # 비전 PC IP (로봇이 접속하는 주소)
@@ -314,16 +323,124 @@ def pixel_to_point(px: float, py: float, pcd_organized: np.ndarray,
     return pcd_organized[vr[idx], vc[idx]].astype(np.float64).copy()
 
 
+def robust_z_from_neighbors(px: float, py: float, pcd_organized: np.ndarray,
+                            valid_mask: np.ndarray) -> tuple[float | None, int]:
+    """픽셀 (px, py) 주변 이웃(중심 + 상하좌우 = 5포인트)의 유효 Z값 중앙값을 반환.
+
+    단일 픽셀 depth는 ToF 노이즈/flying pixel에 취약하므로, 작은 이웃 패치의
+    median으로 완충한다. PICK_Z_NEIGHBOR_OFFSETS 로 패턴 변경 가능
+    (예: 3x3 전체로 넓히려면 대각선 4개 추가).
+
+    Returns:
+        (median_z_mm, 사용된 유효 포인트 개수). 이웃이 전부 invalid면 (None, 0).
+    """
+    H, W = pcd_organized.shape[:2]
+    ix = int(round(px)); ix = min(max(ix, 0), W - 1)
+    iy = int(round(py)); iy = min(max(iy, 0), H - 1)
+
+    zs = []
+    for dx, dy in PICK_Z_NEIGHBOR_OFFSETS:
+        nx, ny = ix + dx, iy + dy
+        if 0 <= nx < W and 0 <= ny < H and valid_mask[ny, nx]:
+            zs.append(float(pcd_organized[ny, nx, 2]))
+
+    if not zs:
+        return None, 0
+    return float(np.median(zs)), len(zs)
+
+
+# ── 픽포인트/디텍션 CSV 로깅 ──────────────────────────────────────────────────
+PICK_LOG_CSV_NAME = "pick_log.csv"   # out_dir 루트에 런 전체 통합 저장
+
+PICK_LOG_FIELDS = [
+    "timestamp", "frame_name", "instance_id", "status", "error_msg",
+    "det_score",
+    "icp_fitness", "icp_rmse_m",
+    "num_points_scene", "num_points_after_outlier_removal", "was_flipped",
+    "pos_icp_x_mm", "pos_icp_y_mm", "pos_icp_z_mm",
+    "pos_2d_x_mm", "pos_2d_y_mm", "pos_2d_z_mm",
+    "pos_blend_x_mm", "pos_blend_y_mm", "pos_blend_z_mm",
+    "z_robust_mm", "z_neighbor_count",
+    "final_x_mm", "final_y_mm", "final_z_mm",
+    "roll_deg", "pitch_deg", "yaw_deg",
+    "height_x_mm", "height_y_mm", "height_z_mm",
+    "height_z_neighbor_count", "height_z_is_fallback",
+]
+
+
+def append_pick_log_csv(csv_path: Path, row: dict) -> None:
+    """한 인스턴스(성공/실패 모두)의 결과를 CSV 한 줄로 append.
+
+    파일이 없으면 헤더를 먼저 쓰고, 있으면 그냥 append(누적 로그).
+    row에 없는 필드는 빈 칸으로 채운다 (실패 케이스는 픽포인트 필드가 비어있음).
+    """
+    is_new = not csv_path.exists()
+    with csv_path.open("a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=PICK_LOG_FIELDS)
+        if is_new:
+            writer.writeheader()
+        writer.writerow({k: row.get(k, "") for k in PICK_LOG_FIELDS})
+
+
+def build_pick_log_row(frame_name: str, inst_idx: int, det_score: float | None,
+                       status: str, error_msg: str = "",
+                       icp_fitness: float = None, icp_rmse_m: float = None,
+                       n_pts: int = None, n_after: int = None, flipped: bool = None,
+                       pick: dict = None, height_point: dict = None) -> dict:
+    """icp_results 한 항목(성공/실패)에서 CSV 행(dict)을 구성."""
+    row = {
+        "timestamp":   datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+        "frame_name":  frame_name,
+        "instance_id": inst_idx,
+        "status":      status,
+        "error_msg":   error_msg,
+        "det_score":   None if det_score is None else round(det_score, 4),
+        "icp_fitness": None if icp_fitness is None else round(icp_fitness, 4),
+        "icp_rmse_m":  None if icp_rmse_m is None else round(icp_rmse_m, 6),
+        "num_points_scene":                 n_pts,
+        "num_points_after_outlier_removal": n_after,
+        "was_flipped": flipped,
+    }
+    if pick is not None:
+        icp_mm   = pick["_pos_icp_mm"]
+        pos2d_mm = pick["_pos_2d_mm"]
+        blend_mm = pick["_pos_blend_mm"]
+        final_mm = pick["position_mm"]
+        deg      = pick["approach_deg"]
+        row.update({
+            "pos_icp_x_mm": round(icp_mm[0], 2), "pos_icp_y_mm": round(icp_mm[1], 2), "pos_icp_z_mm": round(icp_mm[2], 2),
+            "pos_2d_x_mm":  "" if pos2d_mm is None else round(pos2d_mm[0], 2),
+            "pos_2d_y_mm":  "" if pos2d_mm is None else round(pos2d_mm[1], 2),
+            "pos_2d_z_mm":  "" if pos2d_mm is None else round(pos2d_mm[2], 2),
+            "pos_blend_x_mm": round(blend_mm[0], 2), "pos_blend_y_mm": round(blend_mm[1], 2), "pos_blend_z_mm": round(blend_mm[2], 2),
+            "z_robust_mm":      "" if pick["_z_robust_mm"] is None else round(pick["_z_robust_mm"], 2),
+            "z_neighbor_count": pick["_z_neighbor_count"],
+            "final_x_mm": round(final_mm[0], 2), "final_y_mm": round(final_mm[1], 2), "final_z_mm": round(final_mm[2], 2),
+            "roll_deg":  deg["roll_deg"], "pitch_deg": deg["pitch_deg"], "yaw_deg": deg["yaw_deg"],
+        })
+    if height_point is not None:
+        hp = height_point["position_mm"]
+        row.update({
+            "height_x_mm": hp[0], "height_y_mm": hp[1], "height_z_mm": hp[2],
+            "height_z_neighbor_count": height_point["z_neighbor_count"],
+            "height_z_is_fallback":    height_point["z_is_fallback"],
+        })
+    return row
+
+
 def draw_picks_on_overlay(image_bgr: np.ndarray, picks_2d: list) -> np.ndarray:
     out   = image_bgr.copy()
     H, W  = out.shape[:2]
-    for i, (px, py, pick, icp_fitness, bbox) in enumerate(picks_2d):
+    for i, (px, py, pick, icp_fitness, bbox, px_h, py_h) in enumerate(picks_2d):
         color        = tuple(int(c) for c in _PALETTE_BGR[i % len(_PALETTE_BGR)])
         pp           = pick["position_mm"]
         x1, y1, x2, y2 = [int(v) for v in bbox]
         cv2.rectangle(out, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
         cv2.drawMarker(out, (int(px), int(py)), color,
                        cv2.MARKER_CROSS, 24, 2, cv2.LINE_AA)
+        # 높이포인트 크로스헤어 — 픽포인트 표기의 50% 크기(마커 12px, 두께 1px)
+        cv2.drawMarker(out, (int(px_h), int(py_h)), color,
+                       cv2.MARKER_CROSS, 12, 1, cv2.LINE_AA)
         line1 = f"#{i} ({pp[0]:.1f}, {pp[1]:.1f}, {pp[2]:.1f}) mm"
         line2 = f"ICP fit: {icp_fitness:.3f}"
         font, font_scale, thickness, line_gap = cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1, 4
@@ -420,7 +537,16 @@ def build_info_panel(h: int, w: int, info: dict) -> np.ndarray:
             _put(panel, f" Obj #{i}", x0, y, color=ci, scale=0.43)
             y += lh - 2
             row(f" X= {pp[0]:+8.2f} Y= {pp[1]:+8.2f}", y);     y += lh - 3
-            row(f" Z= {pp[2]:+8.2f} mm", y);                     y += lh - 3
+            z_text = f" Z= {pp[2]:+8.2f} mm"
+            row(z_text, y)
+            hp_dict = pk.get("height_point")
+            if hp_dict is not None:
+                (tw, _), _ = cv2.getTextSize(
+                    z_text, cv2.FONT_HERSHEY_SIMPLEX, 0.41, 1)
+                hz = hp_dict["position_mm"][2]
+                _put(panel, f" (H:{hz:+.2f})", x0 + 6 + tw, y,
+                     color=(0, 255, 255), scale=0.41)   # 노란색 = 높이포인트 Z
+            y += lh - 3
             row(f" R= {deg['roll_deg']:+7.2f} P= {deg['pitch_deg']:+7.2f}", y); y += lh - 3
             row(f" Yaw= {deg['yaw_deg']:+7.2f} deg", y);         y += lh - 3
             fc = (60, 220, 60) if fit >= 0.7 else (60, 140, 255) if fit >= 0.5 else (60, 60, 220)
@@ -598,7 +724,7 @@ def run_detection(frame_name, gray, pcd_organized, valid_mask, inferencer, resul
             "bbox_center_2d": [cx_2d, cy_2d],
         })
         if ok:
-            instance_plys.append((ply_path, cx_2d, cy_2d, r.bbox))
+            instance_plys.append((ply_path, cx_2d, cy_2d, r.bbox, float(r.score)))
 
     summary = {
         "frame": frame_name,
@@ -766,8 +892,11 @@ def compute_pick_point(T, pcd_organized: np.ndarray = None,
     순서:
       1) ICP 픽포인트  = CAD_PICK_LOCAL 을 T 로 변환 (offset 미포함)
       2) 2D 픽포인트   = 마스크 중심 픽셀(cx_2d, cy_2d)에 대응하는 실측 3D 포인트
-      3) 블렌딩        = ICP*(1-W) + 2D*W   (W = PICK_2D_MASK_WEIGHT)
-      4) offset 적용   = 블렌딩 결과 + PICK_OFFSET_*_MM
+      3) XY 블렌딩     = ICP*(1-W) + 2D*W   (W = PICK_2D_MASK_WEIGHT)   ← X, Y만 사용
+      4) Z 재계산      = 블렌딩된 (X,Y)에 대응하는 픽셀을 역탐색 →
+                        그 픽셀 주변 이웃(PICK_Z_NEIGHBOR_OFFSETS)의 실측 Z값 median
+                        (단일 픽셀 depth 노이즈 완충. 이웃이 전부 invalid면 블렌딩 Z로 폴백)
+      5) offset 적용   = (블렌딩 XY, median Z) + PICK_OFFSET_*_MM
 
     pcd_organized/valid_mask/cx_2d/cy_2d 중 하나라도 없으면 2D 포인트를
     구할 수 없으므로 ICP 결과만 사용한다(offset은 그대로 적용됨).
@@ -787,6 +916,19 @@ def compute_pick_point(T, pcd_organized: np.ndarray = None,
     else:
         pos_blend_mm = pos_icp_mm                # 2D 정보 없으면 ICP 100%
 
+    # ── Z만 이웃 median으로 재계산 (X, Y는 위 블렌딩 값을 그대로 사용) ──────────
+    z_robust_mm, z_neighbor_count = None, 0
+    if pcd_organized is not None and valid_mask is not None:
+        fallback_px = (cx_2d, cy_2d) if cx_2d is not None else (0, 0)
+        px_blend, py_blend = pick_to_pixel(
+            pos_blend_mm.tolist(), pcd_organized, valid_mask, fallback_px)
+        z_robust_mm, z_neighbor_count = robust_z_from_neighbors(
+            px_blend, py_blend, pcd_organized, valid_mask)
+
+    if z_robust_mm is not None:
+        pos_blend_mm = np.array([pos_blend_mm[0], pos_blend_mm[1], z_robust_mm])
+    # z_robust_mm이 None이면(이웃 전부 invalid) 기존 블렌딩 Z를 그대로 사용(폴백)
+
     pos_final_mm = pos_blend_mm + np.array(
         [PICK_OFFSET_X_MM, PICK_OFFSET_Y_MM, PICK_OFFSET_Z_MM])
 
@@ -804,10 +946,49 @@ def compute_pick_point(T, pcd_organized: np.ndarray = None,
                          "pitch_deg": round(pitch, 4),
                          "yaw_deg":   round(yaw,   4)},
         # 디버그/로그용 중간값
-        "_pos_icp_mm":   pos_icp_mm.tolist(),
-        "_pos_2d_mm":    None if pt2d_mm is None else pt2d_mm.tolist(),
-        "_pos_blend_mm": pos_blend_mm.tolist(),
+        "_pos_icp_mm":       pos_icp_mm.tolist(),
+        "_pos_2d_mm":        None if pt2d_mm is None else pt2d_mm.tolist(),
+        "_pos_blend_mm":     pos_blend_mm.tolist(),
+        "_z_robust_mm":      z_robust_mm,
+        "_z_neighbor_count": z_neighbor_count,
     }
+
+
+def compute_height_point(pick_position_mm: list,
+                         pcd_organized: np.ndarray = None,
+                         valid_mask: np.ndarray = None,
+                         fallback_xy: tuple = (0, 0)) -> dict:
+    """부품 높이 측정용 보조 포인트 계산.
+
+    픽포인트로부터 Y방향으로 HEIGHT_POINT_OFFSET_Y_MM 만큼 이동한 위치를 목표로 하고,
+    Z는 픽포인트와 동일한 방식(그 위치에 대응하는 픽셀 역탐색 → 5포인트 median)으로 구한다.
+
+    순서:
+      1) 목표 XY = (픽포인트_X, 픽포인트_Y + HEIGHT_POINT_OFFSET_Y_MM)
+      2) 목표 위치(Z는 픽포인트 Z로 근사)에 대응하는 픽셀을 pick_to_pixel()로 역탐색
+      3) 그 픽셀 주변 5포인트(PICK_Z_NEIGHBOR_OFFSETS)의 실측 Z median (robust_z_from_neighbors 재사용)
+      4) 이웃이 전부 invalid면 픽포인트 Z로 폴백
+
+    pcd_organized/valid_mask가 없으면 계산 불가 → Z=None으로 반환.
+    """
+    target_x = pick_position_mm[0]
+    target_y = pick_position_mm[1] + HEIGHT_POINT_OFFSET_Y_MM
+    approx_z = pick_position_mm[2]   # 픽셀 역탐색용 근사 Z (실측 무관, 탐색 보조 용도)
+
+    z_robust_mm, z_neighbor_count = None, 0
+    if pcd_organized is not None and valid_mask is not None:
+        px_h, py_h = pick_to_pixel(
+            [target_x, target_y, approx_z], pcd_organized, valid_mask, fallback_xy)
+        z_robust_mm, z_neighbor_count = robust_z_from_neighbors(
+            px_h, py_h, pcd_organized, valid_mask)
+
+    final_z = approx_z if z_robust_mm is None else z_robust_mm
+    return {
+        "position_mm":      [round(target_x, 3), round(target_y, 3), round(final_z, 3)],
+        "z_neighbor_count": z_neighbor_count,
+        "z_is_fallback":    z_robust_mm is None,
+    }
+
 
 def build_icp_elements(scene_pcd, cad_pcd, T, pick, inst_color):
     sv = copy.deepcopy(scene_pcd)
@@ -839,12 +1020,13 @@ def build_icp_elements(scene_pcd, cad_pcd, T, pick, inst_color):
 # =============================================================================
 def run_icp_for_frame(instance_plys, cad_pcd, cad_down,
                       result_dir, frame_name, bgr_image,
-                      pcd_organized=None, valid_mask=None, bg_pcd=None):
+                      pcd_organized=None, valid_mask=None, bg_pcd=None,
+                      csv_path: Path = None):
     icp_results  = []
     picks_2d     = []
     combined_pcd = bg_pcd if bg_pcd is not None else o3d.geometry.PointCloud()
 
-    for ply_path, cx_2d, cy_2d, bbox in instance_plys:
+    for ply_path, cx_2d, cy_2d, bbox, det_score in instance_plys:
         stem     = ply_path.stem
         inst_idx = int(stem.split("obj")[-1])
 
@@ -853,6 +1035,10 @@ def run_icp_for_frame(instance_plys, cad_pcd, cad_down,
         if n_pts < 50:
             icp_results.append({"instance_id": inst_idx,
                                  "error": f"포인트 부족: {n_pts}개"})
+            if csv_path is not None:
+                append_pick_log_csv(csv_path, build_pick_log_row(
+                    frame_name, inst_idx, det_score, status="error",
+                    error_msg=f"포인트 부족: {n_pts}개", n_pts=n_pts))
             continue
 
         log(f"   obj{inst_idx}: {n_pts} pts")
@@ -878,6 +1064,11 @@ def run_icp_for_frame(instance_plys, cad_pcd, cad_down,
             icp_results.append({"instance_id": inst_idx,
                                  "error": "ICP 정합 실패",
                                  "icp_fitness": float(fit)})
+            if csv_path is not None:
+                append_pick_log_csv(csv_path, build_pick_log_row(
+                    frame_name, inst_idx, det_score, status="error",
+                    error_msg="ICP 정합 실패", icp_fitness=fit,
+                    n_pts=n_pts, n_after=n_after, flipped=flipped))
             ply_path.unlink(missing_ok=True)
             continue
 
@@ -886,6 +1077,11 @@ def run_icp_for_frame(instance_plys, cad_pcd, cad_down,
             icp_results.append({"instance_id": inst_idx,
                                  "error": "xyz 범위 이상",
                                  "icp_fitness": float(fit)})
+            if csv_path is not None:
+                append_pick_log_csv(csv_path, build_pick_log_row(
+                    frame_name, inst_idx, det_score, status="error",
+                    error_msg="xyz 범위 이상", icp_fitness=fit,
+                    n_pts=n_pts, n_after=n_after, flipped=flipped))
             ply_path.unlink(missing_ok=True)
             continue
 
@@ -896,6 +1092,11 @@ def run_icp_for_frame(instance_plys, cad_pcd, cad_down,
             icp_results.append({"instance_id": inst_idx,
                                  "error": rot_msg,
                                  "icp_fitness": float(fit)})
+            if csv_path is not None:
+                append_pick_log_csv(csv_path, build_pick_log_row(
+                    frame_name, inst_idx, det_score, status="error",
+                    error_msg=rot_msg, icp_fitness=fit,
+                    n_pts=n_pts, n_after=n_after, flipped=flipped))
             ply_path.unlink(missing_ok=True)
             continue
         log(f"   ✓ 회전 OK: {rot_msg}")
@@ -909,6 +1110,11 @@ def run_icp_for_frame(instance_plys, cad_pcd, cad_down,
         ppos = pick["position_mm"]
         deg  = pick["approach_deg"]
 
+        # 부품 높이 측정용 보조 포인트 (픽포인트에서 Y+15mm, Z는 동일한 5포인트 median 방식)
+        height_point = compute_height_point(
+            ppos, pcd_organized=pcd_organized, valid_mask=valid_mask,
+            fallback_xy=(int(cx_2d), int(cy_2d)))
+
         inst_color   = _PALETTE_RGB_FLOAT[inst_idx % len(_PALETTE_RGB_FLOAT)].tolist()
         combined_pcd += build_icp_elements(scene_pcd, cad_pcd, T, pick, inst_color)
 
@@ -921,12 +1127,29 @@ def run_icp_for_frame(instance_plys, cad_pcd, cad_down,
             px_2d, py_2d = int(cx_2d), int(cy_2d)
 
         w = PICK_2D_MASK_WEIGHT
+        z_dbg = ("Z없음(폴백)" if pick["_z_robust_mm"] is None
+                 else f"Z={pick['_z_robust_mm']:.1f}(n={pick['_z_neighbor_count']})")
         log(f"   픽포인트: ICP{tuple(round(v,1) for v in pick['_pos_icp_mm'])}"
             f" x{1-w:.0%} + 2D{None if pick['_pos_2d_mm'] is None else tuple(round(v,1) for v in pick['_pos_2d_mm'])} x{w:.0%}"
+            f" = XY블렌딩 + 이웃median{z_dbg}"
             f" = 블렌딩{tuple(round(v,1) for v in pick['_pos_blend_mm'])}"
             f" + offset({PICK_OFFSET_X_MM},{PICK_OFFSET_Y_MM},{PICK_OFFSET_Z_MM})"
             f" = 최종{tuple(ppos)}  →  px,py=({px_2d},{py_2d})")
-        picks_2d.append((px_2d, py_2d, pick, float(fit), bbox))
+        hz_dbg = ("Z없음(픽포인트Z 폴백)" if height_point["z_is_fallback"]
+                  else f"n={height_point['z_neighbor_count']}")
+        log(f"   높이포인트: 픽포인트 Y+{HEIGHT_POINT_OFFSET_Y_MM}mm"
+            f" = {tuple(height_point['position_mm'])}  (이웃median {hz_dbg})")
+
+        # 높이포인트도 2D 크로스헤어로 표기하기 위해 픽셀 좌표로 역투영
+        if pcd_organized is not None and valid_mask is not None:
+            px_h, py_h = pick_to_pixel(
+                height_point["position_mm"], pcd_organized, valid_mask,
+                fallback_xy=(px_2d, py_2d))
+        else:
+            px_h, py_h = px_2d, py_2d
+
+        picks_2d.append((px_2d, py_2d, pick, float(fit), bbox, px_h, py_h))
+
 
         result = {
             "instance_id":  inst_idx,
@@ -935,9 +1158,16 @@ def run_icp_for_frame(instance_plys, cad_pcd, cad_down,
             "was_flipped":  flipped,
             "num_points_scene":                 n_pts,
             "num_points_after_outlier_removal": n_after,
-            "pose":       pose,
-            "pick_point": pick,
+            "pose":          pose,
+            "pick_point":    pick,
+            "height_point":  height_point,
         }
+        if csv_path is not None:
+            append_pick_log_csv(csv_path, build_pick_log_row(
+                frame_name, inst_idx, det_score, status="ok",
+                icp_fitness=fit, icp_rmse_m=rmse,
+                n_pts=n_pts, n_after=n_after, flipped=flipped, pick=pick,
+                height_point=height_point))
         print(f"   ✓ 픽포인트: ({ppos[0]:.1f}, {ppos[1]:.1f}, {ppos[2]:.1f}) mm "
               f"fit={fit:.3f} roll={deg['roll_deg']:.2f} "
               f"pitch={deg['pitch_deg']:.2f} yaw={deg['yaw_deg']:.2f}", flush=True)
@@ -1055,7 +1285,8 @@ def process_one_frame(cam, dirs, frame_idx, cfg_camera,
         inst_plys, cad_pcd, cad_down, dirs["results"],
         frame_name, bgr_image,
         pcd_organized=pcd_organized, valid_mask=valid_mask,
-        bg_pcd=bg_pcd)
+        bg_pcd=bg_pcd,
+        csv_path=dirs["results"].parent / PICK_LOG_CSV_NAME)
     icp_ms  = (time.perf_counter() - t0) * 1000.0
     success = [r for r in icp_results if "error" not in r]
     n_fail  = len(icp_results) - len(success)
@@ -1071,7 +1302,8 @@ def process_one_frame(cam, dirs, frame_idx, cfg_camera,
 
     picks = [{"position_mm":  r["pick_point"]["position_mm"],
                "approach_deg": r["pick_point"]["approach_deg"],
-               "icp_fitness":  r["icp_fitness"]}
+               "icp_fitness":  r["icp_fitness"],
+               "height_point": r["height_point"]}
              for r in success]
 
     for i, pk in enumerate(picks):
